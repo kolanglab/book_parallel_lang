@@ -1,0 +1,155 @@
+# 同期プリミティブの内側
+
+第5章で見たとおり、複数スレッドが同じ状態を触ると壊れます。それを防ぐのが **同期プリミティブ（synchronization primitive）** です。本章では、ユーザに見える `Mutex` から、その土台にある atomic 命令まで、層を下りながら「実際どう実装されているのか」を解剖します。同期は魔法ではなく、ハードウェアの atomic 命令の上に積み上げられた工学です。
+
+## 最下層：atomic 操作と CAS
+
+第4章で、`counter += 1` が load・add・store の 3 ステップに分かれ、その隙間で壊れることを見ました。これを防ぐ最も基本的な道具が、**atomic（不可分）操作** です。atomic 操作は「他のスレッドから見て、操作全体が一瞬で起きたか、まだ起きていないかのどちらかにしか見えない」ことをハードウェアが保証します。中途半端な状態が観測されません。
+
+最も重要な atomic 命令が **CAS（Compare-And-Swap、比較交換）** です。CAS は「あるメモリ番地の値が期待値と等しければ、新しい値に書き換える。等しくなければ何もしない。そして元の値（または成否）を返す」という操作を、不可分に行います。x86 では `cmpxchg`、ARM では load-linked/store-conditional（LL/SC）として提供されます。Treiber が 1986 年の報告[Treiber の報告](#cite:treiber1986)で示したように、CAS は並行データ構造の礎です。
+
+CAS を使うと、先ほどのカウンタを正しく増やせます。
+
+```ruby
+# atomic_cas(addr, expected, new) は擬似プリミティブとする
+def atomic_increment(cell)
+  loop do
+    old = cell.value
+    new = old + 1
+    break if atomic_cas(cell, old, new)   # 誰にも邪魔されず更新できたら成功
+    # 失敗 = 間に誰かが書き換えた。読み直してやり直す
+  end
+end
+```
+
+この「読む → 計算する → CAS で書き戻す → 失敗したらループ」というパターンは、ロックフリープログラミング（第8章）の心臓部です。誰も止めずに、衝突したときだけやり直すので **楽観的（optimistic）** な同期と呼ばれます。
+
+> [!NOTE]
+> atomic 操作には CAS のほか、`fetch_and_add`（値を読んで加算し、元の値を返す）、`exchange`（値を入れ替える）、atomic な load/store などがあります。第4章で触れた acquire/release のメモリ順序は、これら atomic 操作に付随して指定します。「atomic であること」と「順序が保証されること」は別の保証で、両方を意識する必要があります。
+
+## spinlock：待つのではなく回す
+
+atomic を使えば、最も単純なロックを作れます。**spinlock（スピンロック）** は、ロックが空くまで CAS をひたすら繰り返して「忙しく待つ（busy-wait）」ロックです。
+
+```ruby
+class SpinLock
+  def initialize; @locked = AtomicBoolean.new(false); end
+
+  def lock
+    # false から true へ CAS できたら獲得成功。できなければ回り続ける
+    until @locked.compare_and_set(false, true)
+      # スピン（CPU を回しながら待つ）
+    end
+  end
+
+  def unlock
+    @locked.set(false)   # release セマンティクスで解放
+  end
+end
+```
+
+spinlock は、ロックを保持する時間がごく短く、待ち時間が「他コアで数命令」程度なら効率的です。OS に制御を渡さず、コンテキストスイッチのコストを避けられるからです。しかし保持時間が長いと、待っているコアが無駄に CPU を焼き続けます。さらに、待っているスレッドと保持しているスレッドが同じコアに割り当てられると、保持側が走れず誰も進めない最悪の事態（特にシングルコアやオーバーサブスクリプション時）も起きます。
+
+> [!WARNING]
+> 素朴な spinlock は、ロック変数を全コアが激しく CAS し合うため、キャッシュコヒーレンシのトラフィック（第2章）で性能が崩壊することがあります。実用的な実装は、CAS の前にまず通常 load で「空いていそうか」を確認する（test-and-test-and-set）、待ち時間に応じて待機を伸ばす（指数バックオフ）、といった工夫を加えます。
+
+## futex：ユーザ空間とカーネルの良いとこ取り
+
+spinlock は短い待ちには良いが長い待ちに弱い。逆に「待つときは OS に寝かせてもらう」純粋なカーネルロックは、競合がないときでもシステムコールのコストがかかります。この両者を折衷するのが **futex（fast userspace mutex）** です。Linux で Franke らが導入しました[futex の論文](#cite:franke2002)。
+
+futex の発想はこうです。
+
+1. **競合がない普通のとき**：ロックの獲得・解放はユーザ空間の atomic 操作だけで完結する。カーネルに入らないので速い。
+2. **競合したときだけ**：`futex` システムコールで「この番地の値が X の間、寝かせてくれ（FUTEX_WAIT）」とカーネルに頼み、解放側が「この番地で寝ている奴を起こせ（FUTEX_WAKE）」と頼む。
+
+```mermaid
+sequenceDiagram
+    participant U as ユーザ空間(atomic)
+    participant K as カーネル(futex)
+    Note over U: 競合なし → atomic だけで獲得/解放（高速）
+    U->>K: 競合あり → FUTEX_WAIT で待機（寝る）
+    Note over K: 解放側が FUTEX_WAKE で起こす
+    K-->>U: 起床して再挑戦
+```
+
+「競合がない限りカーネルに入らない」という設計は、現代の高速なロックの定石です。Linux 上の pthread mutex やほとんどの言語の mutex は、内部的に futex（や同等の機構）の上に作られています。
+
+## mutex：相互排他の標準形
+
+**mutex（mutual exclusion、相互排他ロック）** は、ユーザが最もよく使う同期プリミティブです。「同時に 1 スレッドしか保持できない」ロックで、保持している間はクリティカルセクション（critical section、同時に 1 スレッドしか入れない区間）を独占できます。
+
+```ruby
+mutex = Mutex.new
+counter = 0
+
+threads = 10.times.map do
+  Thread.new do
+    100_000.times do
+      mutex.synchronize { counter += 1 }   # ここは一度に1スレッド
+    end
+  end
+end
+threads.each(&:join)
+puts counter   # => 1_000_000（今度は正しい）
+```
+
+第5章で値がずれたカウンタが、mutex で囲うと正しくなります。mutex の `lock` は acquire、`unlock` は release のセマンティクスを持つので、第4章の happens-before の鎖が張られ、保護した変数の更新が他スレッドから正しく見えます。
+
+mutex は spinlock と futex を組み合わせて作られるのが普通です。「まず少しスピンして、それでも取れなければ futex で寝る」というハイブリッド（適応的 mutex）が、短い競合にも長い競合にも対応します。
+
+> [!CAUTION]
+> mutex は **デッドロック（deadlock）** を生みます。スレッド A がロック X を持って Y を待ち、B が Y を持って X を待つと、互いに永久に待ち続けます。Dijkstra が「deadly embrace（死の抱擁）」と呼んだ現象です[Dijkstra の古典](#cite:dijkstra1968)。回避の定石は「ロックを取る順序を全スレッドで統一する」ことです。処理系の実装者として複数のロックを持つときは、ロックの順序規約を文書化し、必ず守ってください。
+
+## 条件変数：状態の変化を待つ
+
+mutex は「区間の排他」を提供しますが、「ある条件が成り立つまで待つ」用途には向きません。素朴にループで条件をチェックし続けると、ロックを握ったまま回り続けて誰も状態を変えられなくなります。これを解くのが **条件変数（condition variable）** です。
+
+条件変数は mutex と組で使い、「条件が成立するまでロックを手放して寝る（`wait`）」「条件を変えた側が起こす（`signal` / `broadcast`）」という協調を提供します。生産者・消費者のキューが典型例です。
+
+```ruby
+class BoundedQueue
+  def initialize(max)
+    @max = max; @items = []
+    @mutex = Mutex.new
+    @not_full  = ConditionVariable.new
+    @not_empty = ConditionVariable.new
+  end
+
+  def push(x)
+    @mutex.synchronize do
+      @not_full.wait(@mutex) while @items.size >= @max  # 満杯なら空くまで寝る
+      @items.push(x)
+      @not_empty.signal   # 「空でなくなった」と消費者を起こす
+    end
+  end
+
+  def pop
+    @mutex.synchronize do
+      @not_empty.wait(@mutex) while @items.empty?       # 空なら入るまで寝る
+      x = @items.shift
+      @not_full.signal    # 「満杯でなくなった」と生産者を起こす
+      x
+    end
+  end
+end
+```
+
+> [!IMPORTANT]
+> 条件のチェックは `if` ではなく **`while`** で行うのが鉄則です。`wait` から起こされても、起きた瞬間にはまだ条件が成り立っていないことがある（別スレッドに先を越された、あるいは根拠なく起こされる **spurious wakeup**）からです。起きたら必ず条件を再確認する、という規律が並行プログラムの正しさを支えます。
+
+## 層の全体像
+
+本章で下りてきた層を、上から並べると次のようになります。
+
+| 層 | 抽象度 | 実体 |
+|----|--------|------|
+| 条件変数 / mutex | ユーザが使う | OS スレッド API・futex の上 |
+| futex | カーネルとユーザの境界 | システムコール＋atomic |
+| spinlock | 純ユーザ空間 | atomic 命令のループ |
+| CAS / atomic | ハードウェア命令 | `cmpxchg`、LL/SC |
+| キャッシュコヒーレンシ | ハードウェア | MESI など（第2章） |
+
+言語処理系の実装者は、ユーザにはこの一番上（mutex・条件変数や、もっと高水準のチャネル）を見せつつ、内部実装ではもっと下の層を直接使い分けます。
+
+> [!TIP]
+> 「正しさ」のためにはこの章の道具で十分ですが、「スケーラビリティ」のためには不十分なことがあります。ロックは本質的に直列化点を作るので、コア数が増えると競合が性能の壁になります。次章では、ロックそのものを使わずに正しさを保つ **ロックフリー** の世界へ進みます。

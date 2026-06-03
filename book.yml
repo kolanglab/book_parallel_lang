@@ -1,0 +1,35 @@
+title: "並列言語の処理系入門"
+language: "ja"
+ai_generated: true
+chapter_numbers: true
+bibliography: references.bib
+chapters:
+  - cover: cover.md
+  - part: part1.md
+    chapters:
+      - introduction.md
+      - hardware.md
+      - parallel-models.md
+      - memory-model.md
+      - tiny-interpreter.md
+  - part: part2.md
+    chapters:
+      - threads.md
+      - synchronization.md
+      - lock-free.md
+      - message-passing.md
+      - lightweight-threads.md
+      - data-parallel.md
+  - part: part3.md
+    chapters:
+      - global-state.md
+      - gc.md
+      - caches.md
+      - refcount-io.md
+      - gil.md
+      - object-sharing.md
+  - part: part4.md
+    chapters:
+      - debugging.md
+      - performance.md
+      - case-studies.md
