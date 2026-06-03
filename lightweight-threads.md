@@ -37,14 +37,14 @@ fib.resume   # => C
 
 ```mermaid
 graph TD
-    subgraph 軽量スレッド層 M個
-        G1[LT] 
+    subgraph LT層["軽量スレッド層 M個"]
+        G1[LT]
         G2[LT]
         G3[LT]
         G4[LT]
         G5[...数十万...]
     end
-    subgraph OSスレッド層 N個=コア数
+    subgraph OS層["OSスレッド層 N個=コア数"]
         W1[ワーカ1]
         W2[ワーカ2]
     end
