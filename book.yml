@@ -33,3 +33,8 @@ chapters:
       - debugging.md
       - performance.md
       - case-studies.md
+
+repository: "https://github.com/kolanglab/book_parallel_lang"
+
+github_review:
+  enabled: true
