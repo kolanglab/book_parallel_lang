@@ -1,4 +1,4 @@
-# 並列言語の処理系入門
+# 並行・並列言語処理系入門
 
 📖 **公開版（GitHub Pages）**: https://kolanglab.github.io/book_parallel_lang/
 
