@@ -1,4 +1,5 @@
 title: "並行・並列言語処理系入門"
+description: "言語に並列・並行機能を載せ、処理系内部（GC・共有状態・キャッシュ・GIL）を並列実行に耐えさせるまで"
 language: "ja"
 ai_generated: true
 chapter_numbers: true
