@@ -39,7 +39,7 @@ graph TD
 ```
 
 > [!NOTE]
-> この「動的にチャンクを配る」発想は、第11章の work-stealing[work-stealing の論文](#cite:blumofe1999) と地続きです。並列ループを「各チャンクを 1 タスクとして work-stealing スケジューラに流し込む」と実装すれば、タスク並列の基盤をそのままデータ並列に再利用できます。多くの現代ランタイム（Java の parallel stream、Cilk[Cilk-5 の論文](#cite:frigo1998)、各種並列ライブラリ）はこの方針です。
+> この「動的にチャンクを配る」発想は、第11章の work-stealing[](#cite:blumofe1999) と地続きです。並列ループを「各チャンクを 1 タスクとして work-stealing スケジューラに流し込む」と実装すれば、タスク並列の基盤をそのままデータ並列に再利用できます。多くの現代ランタイム（Java の parallel stream、Cilk[](#cite:frigo1998)、各種並列ライブラリ）はこの方針です。
 
 ## reduce：独立でない集約をどう並列化するか
 
